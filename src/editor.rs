@@ -1,3 +1,4 @@
+#[allow(dead_code, unreachable_patterns)]
 use std::io::{stdout, Write};
 
 use anyhow::Result;
@@ -7,6 +8,8 @@ use crossterm::{
     style::{self, Color, Stylize},
     terminal, ExecutableCommand, QueueableCommand,
 };
+
+use crate::buffer::Buffer;
 
 pub enum Action {
     Quit,
@@ -26,6 +29,9 @@ pub enum Mode {
 }
 
 pub struct Editor {
+    buffer: Buffer,
+    vtop: u16,
+    vleft: u16,
     cx: u16,
     cy: u16,
     mode: Mode,
@@ -33,31 +39,30 @@ pub struct Editor {
     stdout: std::io::Stdout,
 }
 
-impl Drop for Editor {
-    fn drop(&mut self) {
-        _ = self.stdout.flush();
-        _ = self.stdout.execute(terminal::LeaveAlternateScreen); // Switch back to main screen
-        _ = terminal::disable_raw_mode();
-    }
-}
-
 impl Editor {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(buffer: Buffer) -> anyhow::Result<Self> {
         let mut stdout = stdout();
         terminal::enable_raw_mode()?;
         stdout
             .execute(terminal::EnterAlternateScreen)? // Switch to alternate screen
             .execute(terminal::Clear(terminal::ClearType::All))?; // Clear the screen
+
+        let size = terminal::size()?;
+
         Ok(Self {
+            buffer,
             cx: 0,
             cy: 0,
+            vtop: 0,
+            vleft: 0,
             mode: Mode::Normal,
-            size: terminal::size().unwrap(),
+            size,
             stdout,
         })
     }
 
     pub fn draw(&mut self) -> anyhow::Result<()> {
+        self.draw_viewport()?;
         self.draw_statusline()?;
         self.stdout.queue(cursor::MoveTo(self.cx, self.cy))?; // Move cursor to (cx, cy)
         self.stdout.flush()?;
@@ -65,9 +70,47 @@ impl Editor {
         Ok(())
     }
 
+    fn vwidth(&self) -> u16 {
+        self.size.0
+    }
+
+    fn vheight(&self) -> u16 {
+        self.size.1 - 2
+    }
+
+    fn line_length(&self) -> u16 {
+        if let Some(line) = self.viewport_line(self.cx) {
+            line.len() as u16
+        } else {
+            0
+        }
+    }
+
+    fn viewport_line(&self, n: u16) -> Option<String> {
+        let buffer_line = self.vtop + n;
+        self.buffer.get_line(buffer_line as usize)
+    }
+
+    pub fn draw_viewport(&mut self) -> anyhow::Result<()> {
+        let vwidth = self.vwidth() as usize;
+        for i in 0..self.vheight() {
+            self.stdout.queue(cursor::MoveTo(0, i))?;
+            let line = match self.viewport_line(i) {
+                None => String::new(),
+                Some(s) => s,
+            };
+
+            self.stdout
+                .queue(cursor::MoveTo(0, i))?
+                .queue(style::Print(format!("{line:<width$}", width = vwidth,)))?;
+        }
+
+        Ok(())
+    }
+
     pub fn draw_statusline(&mut self) -> anyhow::Result<()> {
         let mode = format!(" {:?}  ", self.mode).to_uppercase();
-        let file = " src/main.rs";
+        let file = format!(" {}", self.buffer.file.as_deref().unwrap_or("Untitled"));
         let pos = format!(" {}:{} ", self.cx, self.cy);
 
         let file_width = self.size.0 - mode.len() as u16 - pos.len() as u16 - 2;
@@ -136,13 +179,27 @@ impl Editor {
                         self.cy = self.cy.saturating_sub(1);
                     }
                     Action::MoveDown => {
-                        self.cy = self.cy.saturating_add(1);
+                        self.cy += 1;
+                        if self.cy >= self.vheight() {
+                            self.cy = self.vheight() - 1;
+                        }
                     }
                     Action::MoveLeft => {
                         self.cx = self.cx.saturating_sub(1);
+                        if self.cx < self.vleft {
+                            self.cx = self.vleft;
+                        }
                     }
                     Action::MoveRight => {
                         self.cx = self.cx.saturating_add(1);
+
+                        if self.cx >= self.line_length() {
+                            self.cx = self.line_length();
+                        }
+
+                        if self.cx >= self.vwidth() {
+                            self.cx = self.vwidth() - 1;
+                        }
                     }
                     Action::EnterMode(new_mode) => {
                         self.mode = new_mode;
@@ -199,5 +256,13 @@ impl Editor {
             },
             _ => Ok(None),
         }
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        _ = self.stdout.flush();
+        _ = self.stdout.execute(terminal::LeaveAlternateScreen); // Switch back to main screen
+        _ = terminal::disable_raw_mode();
     }
 }
