@@ -9,7 +9,7 @@ use crossterm::{
     terminal, ExecutableCommand, QueueableCommand,
 };
 
-use crate::buffer::Buffer;
+use crate::{buffer::Buffer, log};
 
 pub enum Action {
     Quit,
@@ -17,6 +17,7 @@ pub enum Action {
     MoveDown,
     MoveLeft,
     MoveRight,
+    PageDown,
     EnterMode(Mode),
     AddChar(char),
     NewLine,
@@ -79,7 +80,8 @@ impl Editor {
     }
 
     fn line_length(&self) -> u16 {
-        if let Some(line) = self.viewport_line(self.cx) {
+        log!("cx: {} -> {:?}", self.cx, self.vtop);
+        if let Some(line) = self.viewport_line(self.cy) {
             line.len() as u16
         } else {
             0
@@ -166,8 +168,32 @@ impl Editor {
         Ok(())
     }
 
+    // TODO: in neovim, when you are at an x position and you move to a shorter line, the cursor
+    // TODO: goes to the max x but returns to the previous line. This is not implemented here.
+    fn check_bounds(&mut self) {
+        let line_length = self.line_length();
+
+        if self.cx >= line_length {
+            if line_length > 0 {
+                self.cx = self.line_length() - 1;
+            } else {
+                self.cx = 0;
+            }
+        }
+
+        if self.cx >= self.vwidth() {
+            self.cx = self.vwidth() - 1;
+        }
+
+        let line_on_buffer = self.vtop + self.cy;
+        if line_on_buffer > self.buffer.len() as u16 - 1 {
+            self.cy = self.buffer.len() as u16 - self.vtop;
+        }
+    }
+
     pub fn run(&mut self) -> anyhow::Result<()> {
         loop {
+            self.check_bounds();
             self.draw()?;
             self.stdout.queue(cursor::MoveTo(self.cx, self.cy))?;
             self.stdout.flush()?;
@@ -176,12 +202,21 @@ impl Editor {
                 match action {
                     Action::Quit => break,
                     Action::MoveUp => {
-                        self.cy = self.cy.saturating_sub(1);
+                        if self.cy == 0 {
+                            // scroll up
+                            if self.vtop > 0 {
+                                self.vtop -= 1;
+                            }
+                        } else {
+                            self.cy = self.cy.saturating_sub(1);
+                        }
                     }
                     Action::MoveDown => {
                         self.cy += 1;
                         if self.cy >= self.vheight() {
-                            self.cy = self.vheight() - 1;
+                            // scroll if possible
+                            self.vtop += 1;
+                            self.cy -= 1;
                         }
                     }
                     Action::MoveLeft => {
@@ -192,14 +227,6 @@ impl Editor {
                     }
                     Action::MoveRight => {
                         self.cx = self.cx.saturating_add(1);
-
-                        if self.cx >= self.line_length() {
-                            self.cx = self.line_length();
-                        }
-
-                        if self.cx >= self.vwidth() {
-                            self.cx = self.vwidth() - 1;
-                        }
                     }
                     Action::EnterMode(new_mode) => {
                         self.mode = new_mode;

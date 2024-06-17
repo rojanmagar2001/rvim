@@ -24,4 +24,8 @@ impl Buffer {
             None
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
 }
